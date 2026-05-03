@@ -21,3 +21,32 @@ type ExampleReply struct {
 
 // Add your RPC definitions here.
 
+type PullMapArgs struct {
+}
+
+type PullMapReply struct {
+	FileName string
+	Done     bool
+}
+
+type SubmitMapArgs struct {
+	FileName string
+}
+
+type SubmitMapReply struct {
+}
+
+type PullReduceArgs struct {
+}
+
+type PullReduceReply struct {
+	ReduceIdx int
+	Done      bool
+}
+
+type SubmitReduceArgs struct {
+	ReduceIdx int
+}
+
+type SubmitReduceReply struct {
+}

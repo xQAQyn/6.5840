@@ -1,0 +1,47 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "build plugin (crash.so)",
+            "type": "shell",
+            "command": "go",
+            "args": [
+                "build",
+                "-buildmode=plugin",
+                "-o",
+                "crash.so",
+                "../mrapps/crash.go"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}/src/main"
+            },
+            "group": "build",
+            "problemMatcher": []
+        },
+        {
+            "label": "build worker binary",
+            "type": "shell",
+            "command": "go",
+            "args": [
+                "build",
+                "-o",
+                "mrworker",
+                "mrworker.go"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}/src/main"
+            },
+            "group": "build",
+            "problemMatcher": []
+        },
+        {
+            "label": "build all (plugin + worker)",
+            "dependsOn": [
+                "build plugin (crash.so)",
+                "build worker binary"
+            ],
+            "dependsOrder": "parallel",
+            "group": "build"
+        }
+    ]
+}
