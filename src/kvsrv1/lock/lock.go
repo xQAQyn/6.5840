@@ -1,8 +1,13 @@
 package lock
 
 import (
-	"6.5840/kvtest1"
+	"time"
+
+	"6.5840/kvsrv1/rpc"
+	kvtest "6.5840/kvtest1"
 )
+
+const LockExpirationTime = time.Second * 10
 
 type Lock struct {
 	// IKVClerk is a go interface for k/v clerks: the interface hides
@@ -11,6 +16,7 @@ type Lock struct {
 	// MakeLock().
 	ck kvtest.IKVClerk
 	// You may add code here
+	name string
 }
 
 // The tester calls MakeLock() and passes in a k/v clerk; your code can
@@ -20,15 +26,45 @@ type Lock struct {
 // lockname argument; locks with different names should be
 // independent.
 func MakeLock(ck kvtest.IKVClerk, lockname string) *Lock {
-	lk := &Lock{ck: ck}
-	// You may add code here
+	lk := &Lock{ck: ck, name: lockname}
 	return lk
 }
 
 func (lk *Lock) Acquire() {
-	// Your code here
+	var version rpc.Tversion
+	for {
+		for {
+			lockTime, oldVersion, err := lk.ck.Get(lk.name)
+			if err == rpc.ErrNoKey {
+				version = 0
+				break
+			} else if lockTime, err := time.Parse(time.RFC3339, lockTime); err == nil && time.Since(lockTime) > LockExpirationTime {
+				version = oldVersion
+				break
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+		err := lk.ck.Put(lk.name, time.Now().Format(time.RFC3339), version)
+		if err == rpc.OK {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
 }
 
 func (lk *Lock) Release() {
-	// Your code here
+	var version rpc.Tversion
+	for {
+		_, oldVersion, err := lk.ck.Get(lk.name)
+		if err == rpc.ErrNoKey {
+			version = 0
+		} else {
+			version = oldVersion
+		}
+		err = lk.ck.Put(lk.name, time.Unix(0, 0).Format(time.RFC3339), version)
+		if err == rpc.OK {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
 }
