@@ -9,6 +9,7 @@ package raft
 
 import (
 	//	"bytes"
+	"bytes"
 	"context"
 	"math/rand"
 	"sync"
@@ -16,6 +17,7 @@ import (
 	"time"
 
 	//	"6.5840/labgob"
+	"6.5840/labgob"
 	"6.5840/labrpc"
 	"6.5840/raftapi"
 	tester "6.5840/tester1"
@@ -65,9 +67,9 @@ type Raft struct {
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
 	role        atomic.Value
-	currentTerm int
-	voteFor     int
-	log         []LogEntry
+	CurrentTerm int
+	VoteFor     int
+	Log         []LogEntry
 
 	commitIdx   int
 	lastApplied int
@@ -90,7 +92,7 @@ type Raft struct {
 func (rf *Raft) GetState() (int, bool) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	term, isLeader := rf.currentTerm, rf.role.Load() == Leader
+	term, isLeader := rf.CurrentTerm, rf.role.Load() == Leader
 	// DPrintf("[Raft %d] GetState: term=%d isLeader=%v", rf.me, term, isLeader)
 	return term, isLeader
 }
@@ -105,32 +107,38 @@ func (rf *Raft) GetState() (int, bool) {
 func (rf *Raft) persist() {
 	// Your code here (3C).
 	// Example:
-	// w := new(bytes.Buffer)
-	// e := labgob.NewEncoder(w)
-	// e.Encode(rf.xxx)
-	// e.Encode(rf.yyy)
-	// raftstate := w.Bytes()
-	// rf.persister.Save(raftstate, nil)
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	e.Encode(rf.CurrentTerm)
+	e.Encode(rf.VoteFor)
+	e.Encode(rf.Log)
+	raftstate := w.Bytes()
+	rf.persister.Save(raftstate, nil)
 }
 
 // restore previously persisted state.
 func (rf *Raft) readPersist(data []byte) {
-	if data == nil || len(data) < 1 { // bootstrap without any state?
+	if len(data) < 1 { // bootstrap without any state?
 		return
 	}
 	// Your code here (3C).
 	// Example:
-	// r := bytes.NewBuffer(data)
-	// d := labgob.NewDecoder(r)
-	// var xxx
-	// var yyy
-	// if d.Decode(&xxx) != nil ||
-	//    d.Decode(&yyy) != nil {
-	//   error...
-	// } else {
-	//   rf.xxx = xxx
-	//   rf.yyy = yyy
-	// }
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+	var CurrentTerm int
+	var VoteFor int
+	var Log []LogEntry
+	if d.Decode(&CurrentTerm) != nil ||
+		d.Decode(&VoteFor) != nil ||
+		d.Decode(&Log) != nil {
+		rf.CurrentTerm = 1
+		rf.VoteFor = rf.me
+		rf.Log = make([]LogEntry, 0)
+	} else {
+		rf.CurrentTerm = CurrentTerm
+		rf.VoteFor = VoteFor
+		rf.Log = Log
+	}
 }
 
 // how many bytes in Raft's persisted log?
@@ -169,43 +177,44 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	defer rf.mu.Unlock()
 
 	DPrintf("[Raft %d] RequestVote recv from S%d: args{Term=%d LastLogIdx=%d LastLogTerm=%d} curTerm=%d voteFor=%d logLen=%d",
-		rf.me, args.CandidateId, args.Term, args.LastLogIdx, args.LastLogTerm, rf.currentTerm, rf.voteFor, len(rf.log))
+		rf.me, args.CandidateId, args.Term, args.LastLogIdx, args.LastLogTerm, rf.CurrentTerm, rf.VoteFor, len(rf.Log))
 
-	if args.Term < rf.currentTerm {
+	if args.Term < rf.CurrentTerm {
 		DPrintf("[Raft %d] RequestVote -> reject S%d (candidate term=%d < curTerm=%d)",
-			rf.me, args.CandidateId, args.Term, rf.currentTerm)
-		reply.Term = rf.currentTerm
+			rf.me, args.CandidateId, args.Term, rf.CurrentTerm)
+		reply.Term = rf.CurrentTerm
 		reply.VoteGranted = false
 		return
 	}
 
-	if args.Term == rf.currentTerm && rf.voteFor != -1 && rf.voteFor != args.CandidateId {
+	if args.Term == rf.CurrentTerm && rf.VoteFor != -1 && rf.VoteFor != args.CandidateId {
 		DPrintf("[Raft %d] RequestVote -> reject S%d (already voted for S%d in term=%d)",
-			rf.me, args.CandidateId, rf.voteFor, rf.currentTerm)
-		reply.Term = rf.currentTerm
+			rf.me, args.CandidateId, rf.VoteFor, rf.CurrentTerm)
+		reply.Term = rf.CurrentTerm
 		reply.VoteGranted = false
 		return
 	}
 
-	if len(rf.log) > 0 {
-		lastLogTerm := rf.log[len(rf.log)-1].Term
-		lastLogIdx := len(rf.log) - 1
+	if len(rf.Log) > 0 {
+		lastLogTerm := rf.Log[len(rf.Log)-1].Term
+		lastLogIdx := len(rf.Log) - 1
 		if lastLogTerm > args.LastLogTerm || (lastLogTerm == args.LastLogTerm && lastLogIdx > args.LastLogIdx) {
 			DPrintf("[Raft %d] RequestVote -> reject S%d (log not up-to-date: my lastTerm=%d lastIdx=%d, candidate lastTerm=%d lastIdx=%d)",
 				rf.me, args.CandidateId, lastLogTerm, lastLogIdx, args.LastLogTerm, args.LastLogIdx)
-			reply.Term = rf.currentTerm
+			reply.Term = rf.CurrentTerm
 			reply.VoteGranted = false
 			return
 		}
 	}
 
 	DPrintf("[Raft %d] RequestVote -> grant to S%d", rf.me, args.CandidateId)
-	if args.Term > rf.currentTerm {
+	if args.Term > rf.CurrentTerm {
 		DPrintf("[Raft %d] RequestVote -> grant (higher term) to S%d, become follower term=%d", rf.me, args.CandidateId, args.Term)
 		rf.becomeFollower(args.Term)
 	}
-	rf.voteFor = args.CandidateId
-	reply.Term = rf.currentTerm
+	rf.VoteFor = args.CandidateId
+	rf.persist()
+	reply.Term = rf.CurrentTerm
 	reply.VoteGranted = true
 }
 
@@ -226,12 +235,15 @@ type PreVoteReply struct {
 }
 
 func (rf *Raft) PreRequestVote(args *PreVoteArgs, reply *PreVoteReply) {
-	DPrintf("[Raft %d] PreRequestVote recv: args{LastLogIdx=%d LastLogTerm=%d} curTerm=%d logLen=%d",
-		rf.me, args.LastLogIdx, args.LastLogTerm, rf.currentTerm, len(rf.log))
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 
-	if len(rf.log) > 0 {
-		lastLogTerm := rf.log[len(rf.log)-1].Term
-		lastLogIdx := len(rf.log) - 1
+	DPrintf("[Raft %d] PreRequestVote recv: args{LastLogIdx=%d LastLogTerm=%d} curTerm=%d logLen=%d",
+		rf.me, args.LastLogIdx, args.LastLogTerm, rf.CurrentTerm, len(rf.Log))
+
+	if len(rf.Log) > 0 {
+		lastLogTerm := rf.Log[len(rf.Log)-1].Term
+		lastLogIdx := len(rf.Log) - 1
 		if lastLogTerm > args.LastLogTerm || (lastLogTerm == args.LastLogTerm && lastLogIdx > args.LastLogIdx) {
 			DPrintf("[Raft %d] PreRequestVote -> reject (log not up-to-date: my lastTerm=%d lastIdx=%d, args lastTerm=%d lastIdx=%d)",
 				rf.me, lastLogTerm, lastLogIdx, args.LastLogTerm, args.LastLogIdx)
@@ -271,26 +283,26 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	defer rf.mu.Unlock()
 
 	DPrintf("[Raft %d] AppendEntries recv from S%d: args{Term=%d PrevLogIdx=%d PrevLogTerm=%d LeaderCommit=%d Entries=%d} curTerm=%d role=%v",
-		rf.me, args.LeaderId, args.Term, args.PrevLogIdx, args.PrevLogTerm, args.LeaderCommit, len(args.Entries), rf.currentTerm, rf.role.Load().(Role))
+		rf.me, args.LeaderId, args.Term, args.PrevLogIdx, args.PrevLogTerm, args.LeaderCommit, len(args.Entries), rf.CurrentTerm, rf.role.Load().(Role))
 
-	if args.Term < rf.currentTerm {
-		DPrintf("[Raft %d] AppendEntries -> reject S%d (args.Term=%d < curTerm=%d)", rf.me, args.LeaderId, args.Term, rf.currentTerm)
-		reply.Term = rf.currentTerm
+	if args.Term < rf.CurrentTerm {
+		DPrintf("[Raft %d] AppendEntries -> reject S%d (args.Term=%d < curTerm=%d)", rf.me, args.LeaderId, args.Term, rf.CurrentTerm)
+		reply.Term = rf.CurrentTerm
 		reply.Success = false
 		return
 	}
 
-	if args.PrevLogIdx > 0 && (len(rf.log) < args.PrevLogIdx+1 || rf.log[args.PrevLogIdx].Term != args.PrevLogTerm) { // log inconsistent
+	if args.PrevLogIdx >= 0 && (len(rf.Log) < args.PrevLogIdx+1 || rf.Log[args.PrevLogIdx].Term != args.PrevLogTerm) { // log inconsistent
 		DPrintf("[Raft %d] AppendEntries -> reject S%d (log inconsistent)", rf.me, args.LeaderId)
-		reply.Term = rf.currentTerm
+		reply.Term = rf.CurrentTerm
 		reply.Success = false
-		if len(rf.log)-1 < args.PrevLogIdx {
-			reply.Term = -1
+		if len(rf.Log)-1 < args.PrevLogIdx {
+			reply.ConflictTerm = -1
 			reply.ConflictTermLogIdx = -1
 		} else {
-			reply.Term = rf.log[args.PrevLogIdx].Term
+			reply.ConflictTerm = rf.Log[args.PrevLogIdx].Term
 			reply.ConflictTermLogIdx = args.PrevLogIdx
-			for reply.ConflictTermLogIdx > 0 && rf.log[reply.ConflictTermLogIdx].Term == rf.log[reply.ConflictTermLogIdx-1].Term {
+			for reply.ConflictTermLogIdx > 0 && rf.Log[reply.ConflictTermLogIdx].Term == rf.Log[reply.ConflictTermLogIdx-1].Term {
 				reply.ConflictTermLogIdx--
 			}
 		}
@@ -307,18 +319,19 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 	rf.resetElectionTimer()
 
-	rf.log = append(rf.log[:args.PrevLogIdx+1], args.Entries...)
+	rf.Log = append(rf.Log[:args.PrevLogIdx+1], args.Entries...)
+	rf.persist()
 	if args.LeaderCommit > rf.commitIdx {
-		newCommitIdx := min(args.LeaderCommit, len(rf.log)-1)
+		newCommitIdx := min(args.LeaderCommit, len(rf.Log)-1)
 		rf.commitEntries(newCommitIdx)
 	}
 
-	if args.Term > rf.currentTerm {
+	if args.Term > rf.CurrentTerm {
 		// DPrintf("[Raft %d] AppendEntries -> raise term %d -> %d", rf.me, rf.currentTerm, args.Term)
 		rf.becomeFollower(args.Term)
 	}
 	// DPrintf("[Raft %d] AppendEntries -> success to S%d", rf.me, args.LeaderId)
-	reply.Term = rf.currentTerm
+	reply.Term = rf.CurrentTerm
 	reply.Success = true
 }
 
@@ -349,20 +362,21 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 // the leader.
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
 
+	rf.mu.Lock()
 	if rf.role.Load() != Leader {
+		rf.mu.Unlock()
 		return -1, -1, false
-		// DPrintf("[Raft %d] Start called but folloer", rf.me)
 	}
 
-	rf.mu.Lock()
-	index := len(rf.log) + 1
-	term := rf.currentTerm
+	index := len(rf.Log) + 1
+	term := rf.CurrentTerm
 	isLeader := true
 	entry := LogEntry{
-		Term: rf.currentTerm,
+		Term: rf.CurrentTerm,
 		Cmd:  command,
 	}
-	rf.log = append(rf.log, entry)
+	rf.Log = append(rf.Log, entry)
+	rf.persist()
 	rf.mu.Unlock()
 
 	DPrintf("[Raft %d] Start called: command=%v", rf.me, command)
@@ -392,7 +406,7 @@ func (rf *Raft) run() {
 func (rf *Raft) sendHeartBeat() {
 	rf.mu.Lock()
 
-	DPrintf("[Raft %d] sendHeartBeat: term=%d logLen=%d commitIdx=%d", rf.me, rf.currentTerm, len(rf.log), rf.commitIdx)
+	DPrintf("[Raft %d] sendHeartBeat: term=%d logLen=%d commitIdx=%d", rf.me, rf.CurrentTerm, len(rf.Log), rf.commitIdx)
 
 	args := make([]*AppendEntriesArgs, len(rf.peers))
 	for i := range rf.peers {
@@ -401,15 +415,15 @@ func (rf *Raft) sendHeartBeat() {
 		}
 
 		arg := AppendEntriesArgs{
-			Term:         rf.currentTerm,
+			Term:         rf.CurrentTerm,
 			LeaderId:     rf.me,
-			PrevLogIdx:   len(rf.log) - 1,
+			PrevLogIdx:   len(rf.Log) - 1,
 			LeaderCommit: rf.commitIdx,
 		}
-		if len(rf.log) == 0 {
+		if len(rf.Log) == 0 {
 			arg.PrevLogTerm = -1
 		} else {
-			arg.PrevLogTerm = rf.log[len(rf.log)-1].Term
+			arg.PrevLogTerm = rf.Log[len(rf.Log)-1].Term
 		}
 
 		args[i] = &arg
@@ -427,8 +441,8 @@ func (rf *Raft) sendHeartBeat() {
 			if ok {
 				rf.mu.Lock()
 				defer rf.mu.Unlock()
-				if rf.currentTerm < reply.Term {
-					DPrintf("[Raft %d] sendHeartBeat: S%d has higher term %d > %d, step down", rf.me, server, reply.Term, rf.currentTerm)
+				if rf.CurrentTerm < reply.Term {
+					DPrintf("[Raft %d] sendHeartBeat: S%d has higher term %d > %d, step down", rf.me, server, reply.Term, rf.CurrentTerm)
 					rf.becomeFollower(reply.Term)
 				}
 			}
@@ -438,6 +452,10 @@ func (rf *Raft) sendHeartBeat() {
 
 func (rf *Raft) sendNewCommand() {
 	rf.mu.Lock()
+	if rf.role.Load() != Leader {
+		rf.mu.Unlock()
+		return
+	}
 	// DPrintf("[Raft %d] sendNewCommand: term=%d logLen=%d commitIdx=%d", rf.me, rf.currentTerm, len(rf.log), rf.commitIdx)
 
 	args := make([]*AppendEntriesArgs, len(rf.peers))
@@ -447,18 +465,23 @@ func (rf *Raft) sendNewCommand() {
 		}
 
 		arg := AppendEntriesArgs{
-			Term:         rf.currentTerm,
+			Term:         rf.CurrentTerm,
 			LeaderId:     rf.me,
 			PrevLogIdx:   rf.nextIdx[i] - 1,
 			LeaderCommit: rf.commitIdx,
 		}
+		// Safety: if log was truncated (e.g., by a newer leader), reset nextIdx
+		if arg.PrevLogIdx >= len(rf.Log) {
+			rf.nextIdx[i] = len(rf.Log)
+			arg.PrevLogIdx = rf.nextIdx[i] - 1
+		}
 		if arg.PrevLogIdx < 0 {
 			arg.PrevLogTerm = -1
 		} else {
-			arg.PrevLogTerm = rf.log[arg.PrevLogIdx].Term
+			arg.PrevLogTerm = rf.Log[arg.PrevLogIdx].Term
 		}
-		if len(rf.log)-1 > arg.PrevLogIdx {
-			entries := rf.log[rf.nextIdx[i]:len(rf.log)]
+		if len(rf.Log)-1 > arg.PrevLogIdx {
+			entries := rf.Log[rf.nextIdx[i]:len(rf.Log)]
 			arg.Entries = make([]LogEntry, len(entries))
 			copy(arg.Entries, entries)
 		}
@@ -481,8 +504,8 @@ func (rf *Raft) sendNewCommand() {
 			sendEndIdx := arg.PrevLogIdx + len(arg.Entries)
 			if !reply.Success {
 				rf.mu.Lock()
-				if rf.currentTerm < reply.Term {
-					DPrintf("[Raft %d] sendNewCommand: S%d has higher term %d > %d, step down", rf.me, server, reply.Term, rf.currentTerm)
+				if rf.CurrentTerm < reply.Term {
+					DPrintf("[Raft %d] sendNewCommand: S%d has higher term %d > %d, step down", rf.me, server, reply.Term, rf.CurrentTerm)
 					rf.becomeFollower(reply.Term)
 					rf.mu.Unlock()
 					return
@@ -490,7 +513,6 @@ func (rf *Raft) sendNewCommand() {
 					DPrintf("[Raft %d] sendNewCommand: S%d log inconsistency, retrying with lower PrevLogIdx", rf.me, server)
 					rf.mu.Unlock()
 					for !reply.Success {
-						reply = AppendEntriesReply{}
 
 						rf.mu.Lock()
 						if reply.ConflictTerm != -1 {
@@ -508,21 +530,22 @@ func (rf *Raft) sendNewCommand() {
 						arg.PrevLogIdx = rf.nextIdx[server] - 1
 						arg.PrevLogTerm = -1
 						if arg.PrevLogIdx >= 0 {
-							arg.PrevLogTerm = rf.log[arg.PrevLogIdx].Term
+							arg.PrevLogTerm = rf.Log[arg.PrevLogIdx].Term
 						}
-						if len(rf.log)-1 > arg.PrevLogIdx {
-							entries := rf.log[rf.nextIdx[i]:len(rf.log)]
+						if len(rf.Log)-1 > arg.PrevLogIdx {
+							entries := rf.Log[rf.nextIdx[server]:len(rf.Log)]
 							arg.Entries = make([]LogEntry, len(entries))
 							copy(arg.Entries, entries)
 						}
 						rf.mu.Unlock()
 
 						DPrintf("[Raft %d] sendNewCommand -> S%d retry: PrevLogIdx=%d Entries=%d", rf.me, server, arg.PrevLogIdx, len(arg.Entries))
+						reply = AppendEntriesReply{}
 						rf.sendAppendEntries(server, arg, &reply, true)
 						sendEndIdx = arg.PrevLogIdx + len(arg.Entries)
 
 						rf.mu.Lock()
-						if rf.currentTerm < reply.Term {
+						if rf.CurrentTerm < reply.Term {
 							// DPrintf("[Raft %d] sendNewCommand: S%d has higher term %d > %d, step down", rf.me, server, reply.Term, rf.currentTerm)
 							rf.becomeFollower(reply.Term)
 							rf.mu.Unlock()
@@ -547,7 +570,7 @@ func (rf *Raft) sendNewCommand() {
 func (rf *Raft) triggerCommit() {
 	rf.mu.AssertHeld()
 
-	for commitIdx := len(rf.log) - 1; commitIdx > rf.commitIdx; commitIdx-- {
+	for commitIdx := len(rf.Log) - 1; commitIdx > rf.commitIdx; commitIdx-- {
 		cnt := 1
 		for i := range rf.peers {
 			if i == rf.me {
@@ -558,7 +581,7 @@ func (rf *Raft) triggerCommit() {
 			}
 		}
 		if cnt > len(rf.peers)/2 {
-			if rf.log[commitIdx].Term == rf.currentTerm {
+			if rf.Log[commitIdx].Term == rf.CurrentTerm {
 				rf.commitEntries(commitIdx)
 			}
 			break
@@ -568,13 +591,13 @@ func (rf *Raft) triggerCommit() {
 
 func (rf *Raft) commitEntries(newCommitIdx int) {
 	DPrintf("[Raft %d] commitEntries: committing from %d to %d (newCommitIdx=%d, logLen=%d)",
-		rf.me, rf.commitIdx+1, newCommitIdx, newCommitIdx, len(rf.log))
+		rf.me, rf.commitIdx+1, newCommitIdx, newCommitIdx, len(rf.Log))
 	for i := rf.commitIdx + 1; i <= newCommitIdx; i++ {
 		// DPrintf("[Raft %d] commitEntries: applying index=%d cmd=%v term=%d",
-		// 	rf.me, i, rf.log[i].Cmd, rf.log[i].Term)
+		// 	rf.me, i, rf.Log[i].Cmd, rf.Log[i].Term)
 		rf.applyCh <- raftapi.ApplyMsg{
 			CommandValid: true,
-			Command:      rf.log[i].Cmd,
+			Command:      rf.Log[i].Cmd,
 			CommandIndex: i + 1,
 		}
 	}
@@ -585,9 +608,9 @@ func (rf *Raft) commitEntries(newCommitIdx int) {
 func (rf *Raft) startPreVote() bool {
 	rf.mu.Lock()
 	DPrintf("[Raft %d] startPreVote: term=%d logLen=%d lastLogTerm=%d",
-		rf.me, rf.currentTerm, len(rf.log), func() int {
-			if len(rf.log) > 0 {
-				return rf.log[len(rf.log)-1].Term
+		rf.me, rf.CurrentTerm, len(rf.Log), func() int {
+			if len(rf.Log) > 0 {
+				return rf.Log[len(rf.Log)-1].Term
 			}
 			return -1
 		}())
@@ -598,11 +621,11 @@ func (rf *Raft) startPreVote() bool {
 			continue
 		}
 		arg := PreVoteArgs{
-			LastLogIdx:  len(rf.log) - 1,
+			LastLogIdx:  len(rf.Log) - 1,
 			LastLogTerm: -1,
 		}
-		if len(rf.log) > 0 {
-			arg.LastLogTerm = rf.log[len(rf.log)-1].Term
+		if len(rf.Log) > 0 {
+			arg.LastLogTerm = rf.Log[len(rf.Log)-1].Term
 		}
 		args[i] = &arg
 	}
@@ -674,13 +697,14 @@ func (rf *Raft) startElection() {
 
 	rf.mu.Lock()
 	rf.role.Store(Candidate)
-	rf.raiseTerm(rf.currentTerm + 1)
-	rf.voteFor = rf.me
+	rf.raiseTerm(rf.CurrentTerm + 1)
+	rf.VoteFor = rf.me
+	rf.persist()
 	rf.voteCnt = 1
 
-	DPrintf("[Raft %d] startElection: term=%d logLen=%d lastLogTerm=%d", rf.me, rf.currentTerm, len(rf.log), func() int {
-		if len(rf.log) > 0 {
-			return rf.log[len(rf.log)-1].Term
+	DPrintf("[Raft %d] startElection: term=%d logLen=%d lastLogTerm=%d", rf.me, rf.CurrentTerm, len(rf.Log), func() int {
+		if len(rf.Log) > 0 {
+			return rf.Log[len(rf.Log)-1].Term
 		}
 		return -1
 	}())
@@ -691,13 +715,13 @@ func (rf *Raft) startElection() {
 			continue
 		}
 		arg := RequestVoteArgs{
-			Term:        rf.currentTerm,
+			Term:        rf.CurrentTerm,
 			CandidateId: rf.me,
-			LastLogIdx:  len(rf.log) - 1,
+			LastLogIdx:  len(rf.Log) - 1,
 			LastLogTerm: -1,
 		}
-		if len(rf.log) > 0 {
-			arg.LastLogTerm = rf.log[len(rf.log)-1].Term
+		if len(rf.Log) > 0 {
+			arg.LastLogTerm = rf.Log[len(rf.Log)-1].Term
 		}
 		args[i] = &arg
 	}
@@ -753,8 +777,8 @@ func (rf *Raft) startElection() {
 							}
 						})
 					}
-				} else if reply.Term > rf.currentTerm { // stop election
-					DPrintf("[Raft %d] S%d replied with higher term %d > %d, stop election", rf.me, server, reply.Term, rf.currentTerm)
+				} else if reply.Term > rf.CurrentTerm { // stop election
+					DPrintf("[Raft %d] S%d replied with higher term %d > %d, stop election", rf.me, server, reply.Term, rf.CurrentTerm)
 					rf.becomeFollower(reply.Term)
 					rf.electionCancelFunc()
 				} else {
@@ -801,9 +825,9 @@ func Make(peers []*labrpc.ClientEnd, me int,
 		persister: persister,
 		me:        me,
 
-		currentTerm: 1,
-		voteFor:     -1,
-		log:         make([]LogEntry, 0),
+		CurrentTerm: 1,
+		VoteFor:     -1,
+		Log:         make([]LogEntry, 0),
 		commitIdx:   -1,
 
 		applyCh: applyCh,
@@ -812,17 +836,15 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.electionTimer = time.NewTimer(randomTime(ElectionTimeout, 2*ElectionTimeout))
 	rf.nextIdx = make([]int, len(peers))
 	rf.matchIdx = make([]int, len(peers))
-	rf.mu.Lock()
-	if me == 0 {
-		rf.becomeLeader()
-	} else {
-		rf.becomeFollower(1)
-	}
-	// DPrintf("[Raft %d] Make: created peer, initialTerm=%d role=%v", rf.me, rf.currentTerm, rf.role.Load().(Role))
-	rf.mu.Unlock()
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
+
+	if rf.role.Load() == nil || rf.role.Load() == Candidate {
+		rf.mu.Lock()
+		rf.becomeFollower(rf.CurrentTerm)
+		rf.mu.Unlock()
+	}
 
 	// start ticker goroutine to start elections
 	go rf.run()
@@ -832,15 +854,16 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 func (rf *Raft) raiseTerm(term int) {
 	rf.mu.AssertHeld() // must hold lock
-	DPrintf("[Raft %d] raiseTerm: %d -> %d", rf.me, rf.currentTerm, term)
-	rf.currentTerm = term
-	rf.voteFor = -1
+	DPrintf("[Raft %d] raiseTerm: %d -> %d", rf.me, rf.CurrentTerm, term)
+	rf.CurrentTerm = term
+	rf.VoteFor = -1
+	rf.persist()
 }
 
 func (rf *Raft) becomeFollower(term int) {
 	rf.mu.AssertHeld() // must hold lock
-	DPrintf("[Raft %d] becomeFollower: curTerm=%d newTerm=%d", rf.me, rf.currentTerm, term)
-	if rf.currentTerm < term {
+	DPrintf("[Raft %d] becomeFollower: curTerm=%d newTerm=%d", rf.me, rf.CurrentTerm, term)
+	if rf.CurrentTerm < term {
 		rf.raiseTerm(term)
 	}
 
@@ -850,12 +873,12 @@ func (rf *Raft) becomeFollower(term int) {
 
 func (rf *Raft) becomeLeader() {
 	rf.mu.AssertHeld() // must hold lock
-	DPrintf("[Raft %d] becomeLeader: term=%d", rf.me, rf.currentTerm)
+	DPrintf("[Raft %d] becomeLeader: term=%d", rf.me, rf.CurrentTerm)
 	rf.role.Store(Leader)
 
 	for i := range rf.peers {
-		rf.nextIdx[i] = len(rf.log)
-		rf.matchIdx[i] = 0
+		rf.nextIdx[i] = len(rf.Log)
+		rf.matchIdx[i] = -1
 	}
 }
 
