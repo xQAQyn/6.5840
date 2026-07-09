@@ -1,6 +1,7 @@
 package raft
 
 import (
+	"fmt"
 	"log"
 	"runtime"
 	"strconv"
@@ -10,12 +11,56 @@ import (
 )
 
 // Debugging
-const Debug = false
+const Debug = true   // Master switch: false = no debug output
+const Verbose = true // Extra-detailed tracing (heartbeats, timer resets, RPC send/recv)
 
+// DPrintf is the original debug printf. Kept for backward compatibility.
+// New code should use Logf/VLogf instead.
 func DPrintf(format string, a ...interface{}) {
 	if Debug {
 		log.Printf(format, a...)
 	}
+}
+
+// Logf is the primary structured logging function for INFO-level events.
+// me is the Raft peer ID. It is safe to call without holding any lock.
+func Logf(me int, format string, a ...interface{}) {
+	if Debug {
+		// gid := getGoroutineID()
+		prefix := fmt.Sprintf("[R%d] ", me)
+		log.Printf(prefix+format, a...)
+	}
+}
+
+// VLogf is verbose-level logging for TRACE events (heartbeats, timer resets, etc.).
+// Suppressed when Verbose is false.
+func VLogf(me int, format string, a ...interface{}) {
+	if Verbose {
+		Logf(me, format, a...)
+	}
+}
+
+// fmtEntry formats a single log entry with its absolute index.
+func fmtEntry(idx int, e LogEntry) string {
+	return fmt.Sprintf("i%d:t%d", idx, e.Term)
+}
+
+// fmtLog formats the full log as a compact string for logging.
+func fmtLog(log []LogEntry) string {
+	parts := make([]string, len(log))
+	for i, e := range log {
+		parts[i] = fmtEntry(i, e)
+	}
+	return "[" + strings.Join(parts, " ") + "]"
+}
+
+// fmtEntries formats a slice of log entries with their absolute indices.
+func fmtEntries(entries []LogEntry, startIdx int) string {
+	parts := make([]string, len(entries))
+	for i, e := range entries {
+		parts[i] = fmtEntry(startIdx+i, e)
+	}
+	return "[" + strings.Join(parts, " ") + "]"
 }
 
 type TrackedMutex struct {

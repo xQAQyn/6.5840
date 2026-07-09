@@ -93,7 +93,6 @@ func (rf *Raft) GetState() (int, bool) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	term, isLeader := rf.CurrentTerm, rf.role.Load() == Leader
-	// DPrintf("[Raft %d] GetState: term=%d isLeader=%v", rf.me, term, isLeader)
 	return term, isLeader
 }
 
@@ -139,6 +138,7 @@ func (rf *Raft) readPersist(data []byte) {
 		rf.VoteFor = VoteFor
 		rf.Log = Log
 	}
+	Logf(rf.me, "read-persist | term=%d voteFor=%d logLen=%d", rf.CurrentTerm, rf.VoteFor, len(rf.Log))
 }
 
 // how many bytes in Raft's persisted log?
@@ -176,20 +176,20 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
-	DPrintf("[Raft %d] RequestVote recv from S%d: args{Term=%d LastLogIdx=%d LastLogTerm=%d} curTerm=%d voteFor=%d logLen=%d",
-		rf.me, args.CandidateId, args.Term, args.LastLogIdx, args.LastLogTerm, rf.CurrentTerm, rf.VoteFor, len(rf.Log))
+	Logf(rf.me, "request-vote-recv | from=S%d argsTerm=%d lastLogIdx=%d lastLogTerm=%d voteFor=%d logLen=%d",
+		args.CandidateId, args.Term, args.LastLogIdx, args.LastLogTerm, rf.VoteFor, len(rf.Log))
 
 	if args.Term < rf.CurrentTerm {
-		DPrintf("[Raft %d] RequestVote -> reject S%d (candidate term=%d < curTerm=%d)",
-			rf.me, args.CandidateId, args.Term, rf.CurrentTerm)
+		Logf(rf.me, "request-vote-reject | to=S%d reason=stale-term argsTerm=%d curTerm=%d",
+			args.CandidateId, args.Term, rf.CurrentTerm)
 		reply.Term = rf.CurrentTerm
 		reply.VoteGranted = false
 		return
 	}
 
 	if args.Term == rf.CurrentTerm && rf.VoteFor != -1 && rf.VoteFor != args.CandidateId {
-		DPrintf("[Raft %d] RequestVote -> reject S%d (already voted for S%d in term=%d)",
-			rf.me, args.CandidateId, rf.VoteFor, rf.CurrentTerm)
+		Logf(rf.me, "request-vote-reject | to=S%d reason=already-voted votedFor=S%d",
+			args.CandidateId, rf.VoteFor)
 		reply.Term = rf.CurrentTerm
 		reply.VoteGranted = false
 		return
@@ -199,18 +199,18 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		lastLogTerm := rf.Log[len(rf.Log)-1].Term
 		lastLogIdx := len(rf.Log) - 1
 		if lastLogTerm > args.LastLogTerm || (lastLogTerm == args.LastLogTerm && lastLogIdx > args.LastLogIdx) {
-			DPrintf("[Raft %d] RequestVote -> reject S%d (log not up-to-date: my lastTerm=%d lastIdx=%d, candidate lastTerm=%d lastIdx=%d)",
-				rf.me, args.CandidateId, lastLogTerm, lastLogIdx, args.LastLogTerm, args.LastLogIdx)
+			Logf(rf.me, "request-vote-reject | to=S%d reason=log-not-up-to-date myLastTerm=%d myLastIdx=%d theirLastTerm=%d theirLastIdx=%d",
+				args.CandidateId, lastLogTerm, lastLogIdx, args.LastLogTerm, args.LastLogIdx)
 			reply.Term = rf.CurrentTerm
 			reply.VoteGranted = false
 			return
 		}
 	}
 
-	DPrintf("[Raft %d] RequestVote -> grant to S%d", rf.me, args.CandidateId)
+	Logf(rf.me, "request-vote-grant | to=S%d", args.CandidateId)
 	if args.Term > rf.CurrentTerm {
-		DPrintf("[Raft %d] RequestVote -> grant (higher term) to S%d, become follower term=%d", rf.me, args.CandidateId, args.Term)
-		rf.becomeFollower(args.Term)
+		Logf(rf.me, "request-vote-grant | to=S%d (higher term, stepping down)", args.CandidateId)
+		rf.becomeFollower(args.Term, "higher-term-request-vote")
 	}
 	rf.VoteFor = args.CandidateId
 	rf.persist()
@@ -219,9 +219,11 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 }
 
 func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
-	DPrintf("[Raft %d] sendRequestVote -> S%d: args{Term=%d LastLogIdx=%d LastLogTerm=%d}", rf.me, server, args.Term, args.LastLogIdx, args.LastLogTerm)
+	VLogf(rf.me, "send-request-vote | ->S%d argsTerm=%d lastLogIdx=%d lastLogTerm=%d",
+		server, args.Term, args.LastLogIdx, args.LastLogTerm)
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
-	DPrintf("[Raft %d] sendRequestVote <- S%d: ok=%v reply{Term=%d VoteGranted=%v}", rf.me, server, ok, reply.Term, reply.VoteGranted)
+	VLogf(rf.me, "send-request-vote | <-S%d ok=%v replyTerm=%d voteGranted=%v",
+		server, ok, reply.Term, reply.VoteGranted)
 	return ok
 }
 
@@ -238,21 +240,21 @@ func (rf *Raft) PreRequestVote(args *PreVoteArgs, reply *PreVoteReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
-	DPrintf("[Raft %d] PreRequestVote recv: args{LastLogIdx=%d LastLogTerm=%d} curTerm=%d logLen=%d",
-		rf.me, args.LastLogIdx, args.LastLogTerm, rf.CurrentTerm, len(rf.Log))
+	VLogf(rf.me, "prevote-recv | argsLastLogIdx=%d argsLastLogTerm=%d logLen=%d",
+		args.LastLogIdx, args.LastLogTerm, len(rf.Log))
 
 	if len(rf.Log) > 0 {
 		lastLogTerm := rf.Log[len(rf.Log)-1].Term
 		lastLogIdx := len(rf.Log) - 1
 		if lastLogTerm > args.LastLogTerm || (lastLogTerm == args.LastLogTerm && lastLogIdx > args.LastLogIdx) {
-			DPrintf("[Raft %d] PreRequestVote -> reject (log not up-to-date: my lastTerm=%d lastIdx=%d, args lastTerm=%d lastIdx=%d)",
-				rf.me, lastLogTerm, lastLogIdx, args.LastLogTerm, args.LastLogIdx)
+			VLogf(rf.me, "prevote-reject | reason=log-not-up-to-date myLastTerm=%d myLastIdx=%d theirLastTerm=%d theirLastIdx=%d",
+				lastLogTerm, lastLogIdx, args.LastLogTerm, args.LastLogIdx)
 			reply.VoteGranted = false
 			return
 		}
 	}
 
-	DPrintf("[Raft %d] PreRequestVote -> grant", rf.me)
+	VLogf(rf.me, "prevote-grant")
 	reply.VoteGranted = true
 }
 
@@ -282,18 +284,28 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
-	DPrintf("[Raft %d] AppendEntries recv from S%d: args{Term=%d PrevLogIdx=%d PrevLogTerm=%d LeaderCommit=%d Entries=%d} curTerm=%d role=%v",
-		rf.me, args.LeaderId, args.Term, args.PrevLogIdx, args.PrevLogTerm, args.LeaderCommit, len(args.Entries), rf.CurrentTerm, rf.role.Load().(Role))
+	Logf(rf.me, "append-entries-recv | from=S%d leaderTerm=%d prevIdx=%d prevTerm=%d leaderCommit=%d nEntries=%d myRole=%v myLogLen=%d myCommitIdx=%d",
+		args.LeaderId, args.Term, args.PrevLogIdx, args.PrevLogTerm, args.LeaderCommit, len(args.Entries), rf.role.Load().(Role), len(rf.Log), rf.commitIdx)
+	if len(args.Entries) > 0 {
+		Logf(rf.me, "append-entries-entries | %s", fmtEntries(args.Entries, args.PrevLogIdx+1))
+	}
 
 	if args.Term < rf.CurrentTerm {
-		DPrintf("[Raft %d] AppendEntries -> reject S%d (args.Term=%d < curTerm=%d)", rf.me, args.LeaderId, args.Term, rf.CurrentTerm)
+		Logf(rf.me, "append-entries-reject | to=S%d reason=stale-term leaderTerm=%d curTerm=%d",
+			args.LeaderId, args.Term, rf.CurrentTerm)
 		reply.Term = rf.CurrentTerm
 		reply.Success = false
 		return
 	}
 
 	if args.PrevLogIdx >= 0 && (len(rf.Log) < args.PrevLogIdx+1 || rf.Log[args.PrevLogIdx].Term != args.PrevLogTerm) { // log inconsistent
-		DPrintf("[Raft %d] AppendEntries -> reject S%d (log inconsistent)", rf.me, args.LeaderId)
+		// Log EXACTLY what we have vs what they expect
+		Logf(rf.me, "append-entries-conflict | prevIdx=%d prevTerm=%d myLogLen=%d",
+			args.PrevLogIdx, args.PrevLogTerm, len(rf.Log))
+		if args.PrevLogIdx < len(rf.Log) {
+			Logf(rf.me, "append-entries-conflict | atIdx=%d myTerm=%d theirPrevTerm=%d",
+				args.PrevLogIdx, rf.Log[args.PrevLogIdx].Term, args.PrevLogTerm)
+		}
 		reply.Term = rf.CurrentTerm
 		reply.Success = false
 		if len(rf.Log)-1 < args.PrevLogIdx {
@@ -311,7 +323,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	// valid RPC below
 	if rf.role.Load() == Candidate { // non-blocking send signal
-		DPrintf("[Raft %d] AppendEntries from S%d: step down from candidate, reset election", rf.me, args.LeaderId)
+		Logf(rf.me, "append-entries-stepdown | from=S%d (candidate stepping down)", args.LeaderId)
 		select {
 		case rf.electionResetCh <- args.Term:
 		default:
@@ -319,33 +331,46 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 	rf.resetElectionTimer()
 
+	// Log what we're about to overwrite, if anything
+	matchPoint := args.PrevLogIdx + 1
+	if matchPoint < len(rf.Log) {
+		Logf(rf.me, "append-entries-truncate | from=S%d keeping[0..%d] overwriting[%d..%d]=%s",
+			args.LeaderId, args.PrevLogIdx, matchPoint, len(rf.Log)-1,
+			fmtEntries(rf.Log[matchPoint:], matchPoint))
+	}
+
 	rf.Log = append(rf.Log[:args.PrevLogIdx+1], args.Entries...)
 	rf.persist()
+	if len(args.Entries) > 0 {
+		Logf(rf.me, "append-entries-apply | newLogLen=%d newLog=%s", len(rf.Log), fmtLog(rf.Log))
+	}
+
 	if args.LeaderCommit > rf.commitIdx {
 		newCommitIdx := min(args.LeaderCommit, len(rf.Log)-1)
+		Logf(rf.me, "append-entries-commit | from=S%d oldCommitIdx=%d newCommitIdx=%d leaderCommit=%d",
+			args.LeaderId, rf.commitIdx, newCommitIdx, args.LeaderCommit)
 		rf.commitEntries(newCommitIdx)
 	}
 
 	if args.Term > rf.CurrentTerm {
-		// DPrintf("[Raft %d] AppendEntries -> raise term %d -> %d", rf.me, rf.currentTerm, args.Term)
-		rf.becomeFollower(args.Term)
+		rf.becomeFollower(args.Term, "higher-term-append-entries")
 	}
-	// DPrintf("[Raft %d] AppendEntries -> success to S%d", rf.me, args.LeaderId)
 	reply.Term = rf.CurrentTerm
 	reply.Success = true
 }
 
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply, retry bool) bool {
-	DPrintf("[Raft %d] sendAppendEntries -> S%d: args{Term=%d PrevLogIdx=%d LeaderCommit=%d Entries=%d}", rf.me, server, args.Term, args.PrevLogIdx, args.LeaderCommit, len(args.Entries))
+	VLogf(rf.me, "send-append-entries | ->S%d argsTerm=%d prevIdx=%d leaderCommit=%d nEntries=%d",
+		server, args.Term, args.PrevLogIdx, args.LeaderCommit, len(args.Entries))
 	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
 	if retry && !ok {
-		// DPrintf("[Raft %d] sendAppendEntries -> S%d: RPC failed, retrying...", rf.me, server)
 		for !ok {
 			time.Sleep(QuickRetryTime)
 			ok = rf.peers[server].Call("Raft.AppendEntries", args, reply)
 		}
 	}
-	DPrintf("[Raft %d] sendAppendEntries <- S%d: ok=%v reply{Term=%d Success=%v}", rf.me, server, ok, reply.Term, reply.Success)
+	VLogf(rf.me, "send-append-entries | <-S%d ok=%v replyTerm=%d success=%v",
+		server, ok, reply.Term, reply.Success)
 	return ok
 }
 
@@ -379,24 +404,24 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	rf.persist()
 	rf.mu.Unlock()
 
-	DPrintf("[Raft %d] Start called: command=%v", rf.me, command)
+	Logf(rf.me, "start | idx=%d term=%d cmd=%v logLen=%d", index, term, command, len(rf.Log))
 	rf.sendNewCommand()
 
 	return index, term, isLeader
 }
 
 func (rf *Raft) run() {
-	// DPrintf("[Raft %d] run loop started", rf.me)
+	VLogf(rf.me, "run-loop-started")
 	for true {
 		select {
 		case <-rf.heartbeatTicker.C:
 			if rf.role.Load() == Leader {
-				// DPrintf("[Raft %d] heartbeat ticker fired, sending heartbeat", rf.me)
+				VLogf(rf.me, "heartbeat-tick")
 				rf.sendNewCommand()
 			}
 		case <-rf.electionTimer.C:
 			if rf.role.Load() != Leader {
-				// DPrintf("[Raft %d] election timer fired, starting election", rf.me)
+				VLogf(rf.me, "election-timer-fired")
 				rf.startElection()
 			}
 		}
@@ -406,7 +431,7 @@ func (rf *Raft) run() {
 func (rf *Raft) sendHeartBeat() {
 	rf.mu.Lock()
 
-	DPrintf("[Raft %d] sendHeartBeat: term=%d logLen=%d commitIdx=%d", rf.me, rf.CurrentTerm, len(rf.Log), rf.commitIdx)
+	VLogf(rf.me, "send-heartbeat | term=%d logLen=%d commitIdx=%d", rf.CurrentTerm, len(rf.Log), rf.commitIdx)
 
 	args := make([]*AppendEntriesArgs, len(rf.peers))
 	for i := range rf.peers {
@@ -442,8 +467,9 @@ func (rf *Raft) sendHeartBeat() {
 				rf.mu.Lock()
 				defer rf.mu.Unlock()
 				if rf.CurrentTerm < reply.Term {
-					DPrintf("[Raft %d] sendHeartBeat: S%d has higher term %d > %d, step down", rf.me, server, reply.Term, rf.CurrentTerm)
-					rf.becomeFollower(reply.Term)
+					Logf(rf.me, "step-down | from=S%d theirTerm=%d myTerm=%d reason=higher-term-heartbeat-reply",
+						server, reply.Term, rf.CurrentTerm)
+					rf.becomeFollower(reply.Term, "higher-term-heartbeat-reply")
 				}
 			}
 		}(i, args[i])
@@ -456,7 +482,6 @@ func (rf *Raft) sendNewCommand() {
 		rf.mu.Unlock()
 		return
 	}
-	// DPrintf("[Raft %d] sendNewCommand: term=%d logLen=%d commitIdx=%d", rf.me, rf.currentTerm, len(rf.log), rf.commitIdx)
 
 	args := make([]*AppendEntriesArgs, len(rf.peers))
 	for i := range rf.peers {
@@ -472,6 +497,8 @@ func (rf *Raft) sendNewCommand() {
 		}
 		// Safety: if log was truncated (e.g., by a newer leader), reset nextIdx
 		if arg.PrevLogIdx >= len(rf.Log) {
+			Logf(rf.me, "replicate-trunc | to=S%d nextIdx=%d >= logLen=%d, resetting nextIdx",
+				i, rf.nextIdx[i], len(rf.Log))
 			rf.nextIdx[i] = len(rf.Log)
 			arg.PrevLogIdx = rf.nextIdx[i] - 1
 		}
@@ -497,7 +524,12 @@ func (rf *Raft) sendNewCommand() {
 		}
 
 		go func(server int, arg *AppendEntriesArgs) {
-			DPrintf("[Raft %d] sendNewCommand -> S%d: PrevLogIdx=%d Entries=%d", rf.me, server, arg.PrevLogIdx, len(arg.Entries))
+			if len(arg.Entries) > 0 {
+				Logf(rf.me, "replicate | to=S%d prevIdx=%d nEntries=%d entries=%s",
+					server, arg.PrevLogIdx, len(arg.Entries), fmtEntries(arg.Entries, arg.PrevLogIdx+1))
+			} else {
+				VLogf(rf.me, "heartbeat | to=S%d prevIdx=%d", server, arg.PrevLogIdx)
+			}
 
 			reply := AppendEntriesReply{}
 			rf.sendAppendEntries(server, arg, &reply, true)
@@ -505,21 +537,25 @@ func (rf *Raft) sendNewCommand() {
 			if !reply.Success {
 				rf.mu.Lock()
 				if rf.CurrentTerm < reply.Term {
-					DPrintf("[Raft %d] sendNewCommand: S%d has higher term %d > %d, step down", rf.me, server, reply.Term, rf.CurrentTerm)
-					rf.becomeFollower(reply.Term)
+					Logf(rf.me, "step-down | from=S%d theirTerm=%d myTerm=%d reason=higher-term-replicate-reply",
+						server, reply.Term, rf.CurrentTerm)
+					rf.becomeFollower(reply.Term, "higher-term-replicate-reply")
 					rf.mu.Unlock()
 					return
 				} else { // log inconsistency, keep retry until success
-					DPrintf("[Raft %d] sendNewCommand: S%d log inconsistency, retrying with lower PrevLogIdx", rf.me, server)
+					Logf(rf.me, "replicate-retry | to=S%d prevIdx=%d conflictTerm=%d conflictIdx=%d",
+						server, rf.nextIdx[server], reply.ConflictTerm, reply.ConflictTermLogIdx)
 					rf.mu.Unlock()
 					for !reply.Success {
 
 						rf.mu.Lock()
 						if reply.ConflictTerm != -1 {
-							DPrintf("[Raft %d] Quick decrease nextIdx[%d] from %d to %d", rf.me, server, rf.nextIdx[server], reply.ConflictTermLogIdx)
+							Logf(rf.me, "replicate-retry | to=S%d quick-decrease nextIdx[%d]: %d -> %d",
+								server, server, rf.nextIdx[server], reply.ConflictTermLogIdx)
 							rf.nextIdx[server] = reply.ConflictTermLogIdx
 						} else if rf.nextIdx[server] > 0 {
-							DPrintf("[Raft %d] Slow decrease nextIdx[%d] from %d to %d", rf.me, server, rf.nextIdx[server], rf.nextIdx[server]-1)
+							Logf(rf.me, "replicate-retry | to=S%d slow-decrease nextIdx[%d]: %d -> %d",
+								server, server, rf.nextIdx[server], rf.nextIdx[server]-1)
 							rf.nextIdx[server]--
 						}
 
@@ -539,15 +575,19 @@ func (rf *Raft) sendNewCommand() {
 						}
 						rf.mu.Unlock()
 
-						DPrintf("[Raft %d] sendNewCommand -> S%d retry: PrevLogIdx=%d Entries=%d", rf.me, server, arg.PrevLogIdx, len(arg.Entries))
+						if len(arg.Entries) > 0 {
+							Logf(rf.me, "replicate-retry-entries | to=S%d entries=%s",
+								server, fmtEntries(arg.Entries, arg.PrevLogIdx+1))
+						}
 						reply = AppendEntriesReply{}
 						rf.sendAppendEntries(server, arg, &reply, true)
 						sendEndIdx = arg.PrevLogIdx + len(arg.Entries)
 
 						rf.mu.Lock()
 						if rf.CurrentTerm < reply.Term {
-							// DPrintf("[Raft %d] sendNewCommand: S%d has higher term %d > %d, step down", rf.me, server, reply.Term, rf.currentTerm)
-							rf.becomeFollower(reply.Term)
+							Logf(rf.me, "step-down | from=S%d theirTerm=%d myTerm=%d reason=higher-term-retry-reply",
+								server, reply.Term, rf.CurrentTerm)
+							rf.becomeFollower(reply.Term, "higher-term-retry-reply")
 							rf.mu.Unlock()
 							return
 						}
@@ -560,7 +600,8 @@ func (rf *Raft) sendNewCommand() {
 			rf.mu.Lock()
 			rf.nextIdx[server] = sendEndIdx + 1
 			rf.matchIdx[server] = sendEndIdx
-			DPrintf("[Raft %d] sendNewCommand: S%d success, nextIdx=%d matchIdx=%d", rf.me, server, rf.nextIdx[server], rf.matchIdx[server])
+			Logf(rf.me, "replicate-ok | to=S%d nextIdx=%d matchIdx=%d",
+				server, rf.nextIdx[server], rf.matchIdx[server])
 			rf.triggerCommit()
 			rf.mu.Unlock()
 		}(i, args[i])
@@ -582,7 +623,12 @@ func (rf *Raft) triggerCommit() {
 		}
 		if cnt > len(rf.peers)/2 {
 			if rf.Log[commitIdx].Term == rf.CurrentTerm {
+				Logf(rf.me, "trigger-commit | checkIdx=%d entryTerm=%d curTerm=%d votes=%d/%d matchIdx=%v",
+					commitIdx, rf.Log[commitIdx].Term, rf.CurrentTerm, cnt, len(rf.peers), rf.matchIdx)
 				rf.commitEntries(commitIdx)
+			} else {
+				Logf(rf.me, "trigger-commit-skip | idx=%d entryTerm=%d curTerm=%d (will not commit from past term)",
+					commitIdx, rf.Log[commitIdx].Term, rf.CurrentTerm)
 			}
 			break
 		}
@@ -590,11 +636,9 @@ func (rf *Raft) triggerCommit() {
 }
 
 func (rf *Raft) commitEntries(newCommitIdx int) {
-	DPrintf("[Raft %d] commitEntries: committing from %d to %d (newCommitIdx=%d, logLen=%d)",
-		rf.me, rf.commitIdx+1, newCommitIdx, newCommitIdx, len(rf.Log))
+	Logf(rf.me, "commit | from=%d to=%d logLen=%d", rf.commitIdx+1, newCommitIdx, len(rf.Log))
 	for i := rf.commitIdx + 1; i <= newCommitIdx; i++ {
-		// DPrintf("[Raft %d] commitEntries: applying index=%d cmd=%v term=%d",
-		// 	rf.me, i, rf.Log[i].Cmd, rf.Log[i].Term)
+		Logf(rf.me, "commit-entry | idx=%d term=%d cmd=%v", i, rf.Log[i].Term, rf.Log[i].Cmd)
 		rf.applyCh <- raftapi.ApplyMsg{
 			CommandValid: true,
 			Command:      rf.Log[i].Cmd,
@@ -602,13 +646,12 @@ func (rf *Raft) commitEntries(newCommitIdx int) {
 		}
 	}
 	rf.commitIdx = newCommitIdx
-	// DPrintf("[Raft %d] commitEntries: done, commitIdx=%d", rf.me, rf.commitIdx)
 }
 
 func (rf *Raft) startPreVote() bool {
 	rf.mu.Lock()
-	DPrintf("[Raft %d] startPreVote: term=%d logLen=%d lastLogTerm=%d",
-		rf.me, rf.CurrentTerm, len(rf.Log), func() int {
+	Logf(rf.me, "prevote-start | term=%d logLen=%d lastLogTerm=%d",
+		rf.CurrentTerm, len(rf.Log), func() int {
 			if len(rf.Log) > 0 {
 				return rf.Log[len(rf.Log)-1].Term
 			}
@@ -649,7 +692,7 @@ func (rf *Raft) startPreVote() bool {
 			reply := PreVoteReply{}
 			ok := rf.sendPreRequestVote(server, arg, &reply)
 			if ok && reply.VoteGranted {
-				DPrintf("[Raft %d] startPreVote <- S%d: granted", rf.me, server)
+				VLogf(rf.me, "prevote-granted-by | S%d", server)
 				preVoteApproveCnt.Add(1)
 				if int(preVoteApproveCnt.Load()) > len(rf.peers)/2 {
 					firstSig.Do(func() {
@@ -660,7 +703,7 @@ func (rf *Raft) startPreVote() bool {
 					})
 				}
 			} else {
-				DPrintf("[Raft %d] startPreVote <- S%d: rejected (ok=%v grant=%v)", rf.me, server, ok, reply.VoteGranted)
+				VLogf(rf.me, "prevote-rejected-by | S%d ok=%v grant=%v", server, ok, reply.VoteGranted)
 				preVoteRejectCnt.Add(1)
 				if int(preVoteRejectCnt.Load()) > len(rf.peers)/2 {
 					firstSig.Do(func() {
@@ -676,10 +719,10 @@ func (rf *Raft) startPreVote() bool {
 
 	select {
 	case <-winC:
-		DPrintf("[Raft %d] startPreVote: won (approveCnt=%d/%d)", rf.me, preVoteApproveCnt.Load(), len(rf.peers))
+		Logf(rf.me, "prevote-won | approveCnt=%d/%d", preVoteApproveCnt.Load(), len(rf.peers))
 		return true
 	case <-loseC:
-		DPrintf("[Raft %d] startPreVote: lost (rejectCnt=%d/%d)", rf.me, preVoteRejectCnt.Load(), len(rf.peers))
+		Logf(rf.me, "prevote-lost | rejectCnt=%d/%d", preVoteRejectCnt.Load(), len(rf.peers))
 		return false
 	}
 }
@@ -702,12 +745,13 @@ func (rf *Raft) startElection() {
 	rf.persist()
 	rf.voteCnt = 1
 
-	DPrintf("[Raft %d] startElection: term=%d logLen=%d lastLogTerm=%d", rf.me, rf.CurrentTerm, len(rf.Log), func() int {
-		if len(rf.Log) > 0 {
-			return rf.Log[len(rf.Log)-1].Term
-		}
-		return -1
-	}())
+	Logf(rf.me, "election-start | term=%d logLen=%d lastLogTerm=%d lastLogIdx=%d",
+		rf.CurrentTerm, len(rf.Log), func() int {
+			if len(rf.Log) > 0 {
+				return rf.Log[len(rf.Log)-1].Term
+			}
+			return -1
+		}(), len(rf.Log)-1)
 
 	args := make([]*RequestVoteArgs, len(rf.peers))
 	for i := range rf.peers {
@@ -763,14 +807,14 @@ func (rf *Raft) startElection() {
 
 			select {
 			case reply := <-done:
-				DPrintf("[Raft %d] vote from S%d is %v", rf.me, server, reply.VoteGranted)
+				VLogf(rf.me, "vote-response | from=S%d granted=%v term=%d", server, reply.VoteGranted, reply.Term)
 				rf.mu.Lock()
 				if reply.VoteGranted {
 					rf.voteCnt++
-					DPrintf("[Raft %d] got vote from S%d, voteCnt=%d/%d", rf.me, server, rf.voteCnt, len(rf.peers))
+					Logf(rf.me, "vote-granted-by | S%d voteCnt=%d/%d", server, rf.voteCnt, len(rf.peers))
 					if rf.voteCnt > len(rf.peers)/2 {
 						firstWin.Do(func() {
-							DPrintf("[Raft %d] won election with %d votes", rf.me, rf.voteCnt)
+							Logf(rf.me, "election-won | votes=%d/%d", rf.voteCnt, len(rf.peers))
 							select {
 							case winC <- struct{}{}:
 							default:
@@ -778,11 +822,12 @@ func (rf *Raft) startElection() {
 						})
 					}
 				} else if reply.Term > rf.CurrentTerm { // stop election
-					DPrintf("[Raft %d] S%d replied with higher term %d > %d, stop election", rf.me, server, reply.Term, rf.CurrentTerm)
-					rf.becomeFollower(reply.Term)
+					Logf(rf.me, "election-abort | S%d replied with higher term=%d > curTerm=%d",
+						server, reply.Term, rf.CurrentTerm)
+					rf.becomeFollower(reply.Term, "higher-term-vote-reply")
 					rf.electionCancelFunc()
 				} else {
-					DPrintf("[Raft %d] vote denied from S%d (reply.Term=%d)", rf.me, server, reply.Term)
+					VLogf(rf.me, "vote-denied-by | S%d replyTerm=%d", server, reply.Term)
 				}
 				rf.mu.Unlock()
 			case <-ctx.Done():
@@ -793,19 +838,19 @@ func (rf *Raft) startElection() {
 	}
 	select {
 	case <-winC:
-		DPrintf("[Raft %d] election won, becoming leader", rf.me)
+		Logf(rf.me, "election-won | becoming leader")
 		rf.mu.Lock()
 		rf.becomeLeader()
 		rf.mu.Unlock()
 		rf.sendNewCommand()
 	case <-rf.electionTimer.C:
-		DPrintf("[Raft %d] election timed out, restarting", rf.me)
+		Logf(rf.me, "election-timeout | restarting election")
 		rf.electionCancelFunc()
 		rf.startElection()
 	case term := <-rf.electionResetCh:
-		DPrintf("[Raft %d] election reset by higher term %d, becoming follower", rf.me, term)
+		Logf(rf.me, "election-reset | higher term=%d, becoming follower", term)
 		rf.electionCancelFunc()
-		rf.becomeFollower(term)
+		rf.becomeFollower(term, "election-reset-by-leader")
 	}
 }
 
@@ -842,7 +887,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	if rf.role.Load() == nil || rf.role.Load() == Candidate {
 		rf.mu.Lock()
-		rf.becomeFollower(rf.CurrentTerm)
+		rf.becomeFollower(rf.CurrentTerm, "init")
 		rf.mu.Unlock()
 	}
 
@@ -854,15 +899,15 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 func (rf *Raft) raiseTerm(term int) {
 	rf.mu.AssertHeld() // must hold lock
-	DPrintf("[Raft %d] raiseTerm: %d -> %d", rf.me, rf.CurrentTerm, term)
+	Logf(rf.me, "raise-term | %d -> %d", rf.CurrentTerm, term)
 	rf.CurrentTerm = term
 	rf.VoteFor = -1
 	rf.persist()
 }
 
-func (rf *Raft) becomeFollower(term int) {
+func (rf *Raft) becomeFollower(term int, reason string) {
 	rf.mu.AssertHeld() // must hold lock
-	DPrintf("[Raft %d] becomeFollower: curTerm=%d newTerm=%d", rf.me, rf.CurrentTerm, term)
+	Logf(rf.me, "become-follower | newTerm=%d curTerm=%d reason=%s", term, rf.CurrentTerm, reason)
 	if rf.CurrentTerm < term {
 		rf.raiseTerm(term)
 	}
@@ -873,7 +918,8 @@ func (rf *Raft) becomeFollower(term int) {
 
 func (rf *Raft) becomeLeader() {
 	rf.mu.AssertHeld() // must hold lock
-	DPrintf("[Raft %d] becomeLeader: term=%d", rf.me, rf.CurrentTerm)
+	Logf(rf.me, "become-leader | term=%d logLen=%d commitIdx=%d log=%s",
+		rf.CurrentTerm, len(rf.Log), rf.commitIdx, fmtLog(rf.Log))
 	rf.role.Store(Leader)
 
 	for i := range rf.peers {
@@ -891,7 +937,7 @@ func (rf *Raft) resetElectionTimer() {
 		}
 	}
 	d := randomTime(ElectionTimeout, 2*ElectionTimeout)
-	// DPrintf("[Raft %d] resetElectionTimer: %v", rf.me, d)
+	VLogf(rf.me, "reset-election-timer | timeout=%v", d)
 	rf.electionTimer.Reset(d)
 }
 
