@@ -11,7 +11,7 @@ import (
 )
 
 // Debugging
-const Debug = true   // Master switch: false = no debug output
+const Debug = false  // Master switch: false = no debug output
 const Verbose = true // Extra-detailed tracing (heartbeats, timer resets, RPC send/recv)
 
 // DPrintf is the original debug printf. Kept for backward compatibility.
