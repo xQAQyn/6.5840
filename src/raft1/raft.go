@@ -42,6 +42,14 @@ const (
 	HeartBeatInterval = 200 * time.Millisecond
 	SleepLength       = 80 * time.Millisecond
 	QuickRetryTime    = 15 * time.Millisecond
+	// PreVoteRPCTimeout caps how long sendPreRequestVote waits for a reply.
+	// PreVote is only an optimization; a peer whose link is partitioned makes
+	// labrpc delay the failure reply by up to LONGDELAY (~7s). Blocking that
+	// long would pin startPreVote -- and the run() loop driving elections --
+	// far past the election timeout, so a healed partition can't re-elect in
+	// time. Keep it well under ElectionTimeout so unreachable peers are simply
+	// counted as no-votes and elections retry on the timer cadence.
+	PreVoteRPCTimeout = ElectionTimeout / 2
 )
 
 type LogEntry struct {

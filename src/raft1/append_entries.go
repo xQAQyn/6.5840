@@ -131,7 +131,7 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 		server, args.Term, args.PrevLogIdx, args.LeaderCommit, len(args.Entries))
 	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
 	if retry && !ok {
-		for !ok {
+		for !ok && rf.role.Load() == Leader {
 			time.Sleep(QuickRetryTime)
 			ok = rf.peers[server].Call("Raft.AppendEntries", args, reply)
 		}

@@ -1,5 +1,7 @@
 package raft
 
+import "time"
+
 // RequestVote RPC: candidates solicit votes from peers during elections.
 // PreVote RPC: a preliminary check before incrementing term, to avoid
 // disrupting the cluster when a partitioned node has a stale log.
@@ -106,6 +108,26 @@ func (rf *Raft) PreRequestVote(args *PreVoteArgs, reply *PreVoteReply) {
 }
 
 func (rf *Raft) sendPreRequestVote(server int, args *PreVoteArgs, reply *PreVoteReply) bool {
-	ok := rf.peers[server].Call("Raft.PreRequestVote", args, reply)
-	return ok
+	type result struct {
+		ok    bool
+		reply PreVoteReply
+	}
+	done := make(chan result, 1)
+	go func() {
+		rep := PreVoteReply{}
+		ok := rf.peers[server].Call("Raft.PreRequestVote", args, &rep)
+		done <- result{ok, rep}
+	}()
+	select {
+	case r := <-done:
+		*reply = r.reply
+		return r.ok
+	case <-time.After(PreVoteRPCTimeout):
+		// Peer did not answer in time (most likely a partitioned link whose
+		// failure reply labrpc would otherwise delay ~7s). Treat as a no-vote
+		// so startPreVote can fail fast and the election retries on the timer.
+		// The in-flight Call is abandoned; it finishes on its own and the
+		// buffered channel prevents it from leaking.
+		return false
+	}
 }
