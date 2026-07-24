@@ -25,8 +25,8 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
-	Logf(rf.me, "request-vote-recv | from=S%d argsTerm=%d lastLogIdx=%d lastLogTerm=%d voteFor=%d logLen=%d",
-		args.CandidateId, args.Term, args.LastLogIdx, args.LastLogTerm, rf.VoteFor, len(rf.Log))
+	Logf(rf.me, "request-vote-recv | from=S%d argsTerm=%d lastLogIdx=%d lastLogTerm=%d voteFor=%d lastLogIdx=%d",
+		args.CandidateId, args.Term, args.LastLogIdx, args.LastLogTerm, rf.VoteFor, rf.lastLogIndex())
 
 	if args.Term < rf.CurrentTerm {
 		Logf(rf.me, "request-vote-reject | to=S%d reason=stale-term argsTerm=%d curTerm=%d",
@@ -44,16 +44,16 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		return
 	}
 
-	if len(rf.Log) > 0 {
-		lastLogTerm := rf.Log[len(rf.Log)-1].Term
-		lastLogIdx := len(rf.Log) - 1
-		if lastLogTerm > args.LastLogTerm || (lastLogTerm == args.LastLogTerm && lastLogIdx > args.LastLogIdx) {
-			Logf(rf.me, "request-vote-reject | to=S%d reason=log-not-up-to-date myLastTerm=%d myLastIdx=%d theirLastTerm=%d theirLastIdx=%d",
-				args.CandidateId, lastLogTerm, lastLogIdx, args.LastLogTerm, args.LastLogIdx)
-			reply.Term = rf.CurrentTerm
-			reply.VoteGranted = false
-			return
-		}
+	// Candidate's log must be at least as up-to-date as ours. The snapshot's
+	// last entry counts, so compare even when the in-memory log is empty.
+	lastLogTerm := rf.lastLogTerm()
+	lastLogIdx := rf.lastLogIndex()
+	if lastLogTerm > args.LastLogTerm || (lastLogTerm == args.LastLogTerm && lastLogIdx > args.LastLogIdx) {
+		Logf(rf.me, "request-vote-reject | to=S%d reason=log-not-up-to-date myLastTerm=%d myLastIdx=%d theirLastTerm=%d theirLastIdx=%d",
+			args.CandidateId, lastLogTerm, lastLogIdx, args.LastLogTerm, args.LastLogIdx)
+		reply.Term = rf.CurrentTerm
+		reply.VoteGranted = false
+		return
 	}
 
 	Logf(rf.me, "request-vote-grant | to=S%d", args.CandidateId)
@@ -89,18 +89,16 @@ func (rf *Raft) PreRequestVote(args *PreVoteArgs, reply *PreVoteReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
-	VLogf(rf.me, "prevote-recv | argsLastLogIdx=%d argsLastLogTerm=%d logLen=%d",
-		args.LastLogIdx, args.LastLogTerm, len(rf.Log))
+	VLogf(rf.me, "prevote-recv | argsLastLogIdx=%d argsLastLogTerm=%d lastLogIdx=%d",
+		args.LastLogIdx, args.LastLogTerm, rf.lastLogIndex())
 
-	if len(rf.Log) > 0 {
-		lastLogTerm := rf.Log[len(rf.Log)-1].Term
-		lastLogIdx := len(rf.Log) - 1
-		if lastLogTerm > args.LastLogTerm || (lastLogTerm == args.LastLogTerm && lastLogIdx > args.LastLogIdx) {
-			VLogf(rf.me, "prevote-reject | reason=log-not-up-to-date myLastTerm=%d myLastIdx=%d theirLastTerm=%d theirLastIdx=%d",
-				lastLogTerm, lastLogIdx, args.LastLogTerm, args.LastLogIdx)
-			reply.VoteGranted = false
-			return
-		}
+	lastLogTerm := rf.lastLogTerm()
+	lastLogIdx := rf.lastLogIndex()
+	if lastLogTerm > args.LastLogTerm || (lastLogTerm == args.LastLogTerm && lastLogIdx > args.LastLogIdx) {
+		VLogf(rf.me, "prevote-reject | reason=log-not-up-to-date myLastTerm=%d myLastIdx=%d theirLastTerm=%d theirLastIdx=%d",
+			lastLogTerm, lastLogIdx, args.LastLogTerm, args.LastLogIdx)
+		reply.VoteGranted = false
+		return
 	}
 
 	VLogf(rf.me, "prevote-grant")

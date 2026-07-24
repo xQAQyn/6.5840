@@ -8,6 +8,7 @@ package raft
 import (
 	"context"
 	"math/rand"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -76,6 +77,23 @@ type Raft struct {
 	lastApplied int
 	applyCh     chan raftapi.ApplyMsg
 
+	// Snapshot (3D). lastIncludedIndex is the logical index of the last log
+	// entry captured by the snapshot (0 = no snapshot yet, so the first real
+	// entry is logical index 1 -- matching the pre-snapshot behavior).
+	// lastIncludedTerm is that entry's term. snapshot holds the
+	// service-supplied snapshot bytes. rf.Log stores only the entries AFTER
+	// the snapshot: rf.Log[i] has logical index lastIncludedIndex + 1 + i.
+	lastIncludedIndex int
+	lastIncludedTerm  int
+	snapshot          []byte
+
+	// applyCond wakes the applier goroutine when commitIdx advances or a
+	// snapshot is installed. The applier is the single sender to applyCh, so
+	// it sends in strict index order and -- crucially -- performs the channel
+	// send WITHOUT holding rf.mu (the service may call back into Snapshot()
+	// while we send, which would otherwise deadlock).
+	applyCond *sync.Cond
+
 	electionCancelFunc context.CancelFunc
 	electionTimer      *time.Timer
 	electionResetCh    chan int
@@ -116,7 +134,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		return -1, -1, false
 	}
 
-	index := len(rf.Log) + 1
+	index := rf.lastLogIndex() + 1
 	term := rf.CurrentTerm
 	isLeader := true
 	entry := LogEntry{
@@ -170,12 +188,19 @@ func Make(peers []*labrpc.ClientEnd, me int,
 		CurrentTerm: 1,
 		VoteFor:     -1,
 		Log:         make([]LogEntry, 0),
-		commitIdx:   -1,
+
+		// commitIdx / lastApplied / lastIncludedIndex default to 0: with no
+		// snapshot, logical index 0 is "nothing committed/applied yet".
+		commitIdx:         0,
+		lastApplied:       0,
+		lastIncludedIndex: 0,
+		lastIncludedTerm:  0,
 
 		electionCancelFunc: func() {},
 
 		applyCh: applyCh,
 	}
+	rf.applyCond = sync.NewCond(&rf.mu)
 	rf.heartbeatTicker = time.NewTicker(HeartBeatInterval)
 	rf.electionTimer = time.NewTimer(randomTime(ElectionTimeout, 2*ElectionTimeout))
 	rf.nextIdx = make([]int, len(peers))
@@ -183,6 +208,16 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
+	// The persister also holds the service snapshot; keep a copy so we can
+	// re-send it via InstallSnapshot and re-include it in every Save().
+	rf.snapshot = persister.ReadSnapshot()
+	// On restart the service restores the snapshot itself (see newRfsrv), so
+	// the applier must not resend it: start lastApplied at the snapshot
+	// boundary. commitIdx is never below the snapshot boundary.
+	rf.lastApplied = rf.lastIncludedIndex
+	if rf.commitIdx < rf.lastIncludedIndex {
+		rf.commitIdx = rf.lastIncludedIndex
+	}
 
 	if rf.role.Load() == nil || rf.role.Load() == Candidate {
 		rf.mu.Lock()
@@ -192,8 +227,54 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// start ticker goroutine to start elections
 	go rf.run()
+	// start the applier goroutine that drains committed entries / snapshots
+	// onto applyCh (single sender, sends outside the lock)
+	go rf.applier()
 
 	return rf
+}
+
+// applier is the single goroutine that sends ApplyMsgs on applyCh. It gathers
+// what needs applying under rf.mu, then releases the lock before sending --
+// the service may call back into rf.Snapshot() while we block on the channel
+// send, and doing that under rf.mu would deadlock. Being the sole sender also
+// guarantees commands are delivered in strict index order.
+func (rf *Raft) applier() {
+	for {
+		rf.mu.Lock()
+		// Wait until there is something to apply: either a committed entry
+		// beyond lastApplied, or an installed snapshot ahead of lastApplied.
+		for rf.lastApplied == rf.commitIdx {
+			rf.applyCond.Wait()
+		}
+		var msgs []raftapi.ApplyMsg
+		if rf.lastApplied < rf.lastIncludedIndex {
+			// An installed snapshot the service has not seen yet. Send it first
+			// so the command indices that follow line up. This only ever
+			// advances the service's state forward (never backwards) because we
+			// only install snapshots with index > our previous lastIncludedIndex.
+			msgs = append(msgs, raftapi.ApplyMsg{
+				SnapshotValid: true,
+				Snapshot:      rf.snapshot,
+				SnapshotTerm:  rf.lastIncludedTerm,
+				SnapshotIndex: rf.lastIncludedIndex,
+			})
+			rf.lastApplied = rf.lastIncludedIndex
+		}
+		for idx := rf.lastApplied + 1; idx <= rf.commitIdx; idx++ {
+			msgs = append(msgs, raftapi.ApplyMsg{
+				CommandValid: true,
+				Command:      rf.getEntry(idx).Cmd,
+				CommandIndex: idx,
+			})
+		}
+		rf.lastApplied = rf.commitIdx
+		rf.mu.Unlock()
+
+		for _, m := range msgs {
+			rf.applyCh <- m
+		}
+	}
 }
 
 func (rf *Raft) raiseTerm(term int) {
@@ -218,13 +299,18 @@ func (rf *Raft) becomeFollower(term int, reason string) {
 
 func (rf *Raft) becomeLeader() {
 	rf.mu.AssertHeld() // must hold lock
-	Logf(rf.me, "become-leader | term=%d logLen=%d commitIdx=%d log=%s",
-		rf.CurrentTerm, len(rf.Log), rf.commitIdx, fmtLog(rf.Log))
+	Logf(rf.me, "become-leader | term=%d lastLogIdx=%d commitIdx=%d lastIncludedIdx=%d log=%s",
+		rf.CurrentTerm, rf.lastLogIndex(), rf.commitIdx, rf.lastIncludedIndex, fmtLog(rf.Log))
 	rf.role.Store(Leader)
 
+	// nextIdx/matchIdx are logical indices. Optimistically start each follower
+	// at the end of our log; back off on conflict. matchIdx floors at the
+	// snapshot boundary (everything in the snapshot is assumed replicated,
+	// which is safe -- it never helps commit any future entry until the
+	// follower actually catches up past it).
 	for i := range rf.peers {
-		rf.nextIdx[i] = len(rf.Log)
-		rf.matchIdx[i] = -1
+		rf.nextIdx[i] = rf.lastLogIndex() + 1
+		rf.matchIdx[i] = rf.lastIncludedIndex
 	}
 }
 

@@ -24,8 +24,11 @@ func (rf *Raft) persist() {
 	e.Encode(rf.CurrentTerm)
 	e.Encode(rf.VoteFor)
 	e.Encode(rf.Log)
+	// 3D: snapshot boundary so the truncated log can be interpreted on restart.
+	e.Encode(rf.lastIncludedIndex)
+	e.Encode(rf.lastIncludedTerm)
 	raftstate := w.Bytes()
-	rf.persister.Save(raftstate, nil)
+	rf.persister.Save(raftstate, rf.snapshot)
 }
 
 // restore previously persisted state.
@@ -40,18 +43,28 @@ func (rf *Raft) readPersist(data []byte) {
 	var CurrentTerm int
 	var VoteFor int
 	var Log []LogEntry
+	var lastIncludedIndex int
+	var lastIncludedTerm int
 	if d.Decode(&CurrentTerm) != nil ||
 		d.Decode(&VoteFor) != nil ||
-		d.Decode(&Log) != nil {
+		d.Decode(&Log) != nil ||
+		d.Decode(&lastIncludedIndex) != nil ||
+		d.Decode(&lastIncludedTerm) != nil {
+		// Corrupt or old-format state: start clean.
 		rf.CurrentTerm = 1
 		rf.VoteFor = rf.me
 		rf.Log = make([]LogEntry, 0)
+		rf.lastIncludedIndex = 0
+		rf.lastIncludedTerm = 0
 	} else {
 		rf.CurrentTerm = CurrentTerm
 		rf.VoteFor = VoteFor
 		rf.Log = Log
+		rf.lastIncludedIndex = lastIncludedIndex
+		rf.lastIncludedTerm = lastIncludedTerm
 	}
-	Logf(rf.me, "read-persist | term=%d voteFor=%d logLen=%d", rf.CurrentTerm, rf.VoteFor, len(rf.Log))
+	Logf(rf.me, "read-persist | term=%d voteFor=%d logLen=%d lastIncludedIdx=%d lastIncludedTerm=%d",
+		rf.CurrentTerm, rf.VoteFor, len(rf.Log), rf.lastIncludedIndex, rf.lastIncludedTerm)
 }
 
 // how many bytes in Raft's persisted log?
@@ -67,5 +80,45 @@ func (rf *Raft) PersistBytes() int {
 // that index. Raft should now trim its log as much as possible.
 func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	// Your code here (3D).
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 
+	// Never go backwards, and ignore nonsensical indices. index is a logical
+	// command index; it must lie within (lastIncludedIndex, lastLogIndex()].
+	if index <= rf.lastIncludedIndex || index > rf.lastLogIndex() {
+		return
+	}
+
+	// Term of the entry being captured by the snapshot (becomes the new
+	// lastIncludedTerm). index > lastIncludedIndex guarantees getLogTerm reads
+	// from the in-memory log.
+	lastIncludedTerm := rf.getLogTerm(index)
+
+	// Keep only entries strictly after `index`. Copy into a fresh backing
+	// array so the discarded prefix becomes unreachable and the GC can free
+	// it (no lingering references into the old slice's capacity).
+	keepFrom := rf.toSliceIdx(index + 1) // first slice index to keep
+	trimmed := make([]LogEntry, len(rf.Log)-keepFrom)
+	copy(trimmed, rf.Log[keepFrom:])
+
+	rf.lastIncludedIndex = index
+	rf.lastIncludedTerm = lastIncludedTerm
+	rf.snapshot = snapshot
+	rf.Log = trimmed
+
+	// The service has already applied everything up to `index` (it only calls
+	// Snapshot after applying), so the applier should not resend it. lastApplied
+	// is already >= index in normal operation; this clamp is a safety net and
+	// never moves it backwards.
+	if rf.lastApplied < index {
+		rf.lastApplied = index
+	}
+	// commitIdx is never below the snapshot boundary.
+	if rf.commitIdx < index {
+		rf.commitIdx = index
+	}
+
+	Logf(rf.me, "snapshot | lastIncludedIdx=%d lastIncludedTerm=%d keptEntries=%d commitIdx=%d lastApplied=%d",
+		rf.lastIncludedIndex, rf.lastIncludedTerm, len(rf.Log), rf.commitIdx, rf.lastApplied)
+	rf.persist()
 }

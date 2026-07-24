@@ -63,6 +63,52 @@ func fmtEntries(entries []LogEntry, startIdx int) string {
 	return "[" + strings.Join(parts, " ") + "]"
 }
 
+// --- Snapshot-aware log indexing (logical indices) ---
+//
+// rf.Log holds only the entries AFTER the snapshot. The entry rf.Log[i] has
+// logical index  lastIncludedIndex + 1 + i.  lastIncludedIndex == 0 means no
+// snapshot has been taken yet (the first real entry is logical index 1), which
+// reproduces the pre-snapshot behavior exactly so 3A/3B/3C are unaffected.
+//
+// All methods below assume the caller holds rf.mu (they read rf.Log /
+// lastIncludedIndex, which are protected by it).
+
+// lastLogIndex returns the logical index of the last log entry. When the
+// in-memory log is empty this is lastIncludedIndex (the snapshot's last entry).
+func (rf *Raft) lastLogIndex() int {
+	return rf.lastIncludedIndex + len(rf.Log)
+}
+
+// lastLogTerm returns the term of the last log entry, or lastIncludedTerm
+// when the in-memory log is empty (the snapshot's last entry).
+func (rf *Raft) lastLogTerm() int {
+	if len(rf.Log) > 0 {
+		return rf.Log[len(rf.Log)-1].Term
+	}
+	return rf.lastIncludedTerm
+}
+
+// toSliceIdx converts a logical log index into an index into rf.Log.
+// It returns a value < 0 when the index falls inside the snapshot.
+func (rf *Raft) toSliceIdx(logIdx int) int {
+	return logIdx - rf.lastIncludedIndex - 1
+}
+
+// getLogTerm returns the term of the log entry at logical index logIdx.
+// logIdx == lastIncludedIndex yields lastIncludedTerm (the snapshot boundary).
+// The caller must ensure logIdx is within [lastIncludedIndex, lastLogIndex()].
+func (rf *Raft) getLogTerm(logIdx int) int {
+	if logIdx == rf.lastIncludedIndex {
+		return rf.lastIncludedTerm
+	}
+	return rf.Log[rf.toSliceIdx(logIdx)].Term
+}
+
+// getEntry returns the log entry at logical index logIdx (> lastIncludedIndex).
+func (rf *Raft) getEntry(logIdx int) LogEntry {
+	return rf.Log[rf.toSliceIdx(logIdx)]
+}
+
 type TrackedMutex struct {
 	mu       sync.Mutex
 	holderID atomic.Uint64

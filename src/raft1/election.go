@@ -13,13 +13,8 @@ import (
 
 func (rf *Raft) startPreVote() bool {
 	rf.mu.Lock()
-	Logf(rf.me, "prevote-start | term=%d logLen=%d lastLogTerm=%d",
-		rf.CurrentTerm, len(rf.Log), func() int {
-			if len(rf.Log) > 0 {
-				return rf.Log[len(rf.Log)-1].Term
-			}
-			return -1
-		}())
+	Logf(rf.me, "prevote-start | term=%d lastLogIdx=%d lastLogTerm=%d",
+		rf.CurrentTerm, rf.lastLogIndex(), rf.lastLogTerm())
 
 	args := make([]*PreVoteArgs, len(rf.peers))
 	for i := range rf.peers {
@@ -27,11 +22,8 @@ func (rf *Raft) startPreVote() bool {
 			continue
 		}
 		arg := PreVoteArgs{
-			LastLogIdx:  len(rf.Log) - 1,
-			LastLogTerm: -1,
-		}
-		if len(rf.Log) > 0 {
-			arg.LastLogTerm = rf.Log[len(rf.Log)-1].Term
+			LastLogIdx:  rf.lastLogIndex(),
+			LastLogTerm: rf.lastLogTerm(),
 		}
 		args[i] = &arg
 	}
@@ -108,13 +100,8 @@ func (rf *Raft) startElection() {
 	rf.persist()
 	rf.voteCnt = 1
 
-	Logf(rf.me, "election-start | term=%d logLen=%d lastLogTerm=%d lastLogIdx=%d",
-		rf.CurrentTerm, len(rf.Log), func() int {
-			if len(rf.Log) > 0 {
-				return rf.Log[len(rf.Log)-1].Term
-			}
-			return -1
-		}(), len(rf.Log)-1)
+	Logf(rf.me, "election-start | term=%d lastLogIdx=%d lastLogTerm=%d",
+		rf.CurrentTerm, rf.lastLogIndex(), rf.lastLogTerm())
 
 	args := make([]*RequestVoteArgs, len(rf.peers))
 	for i := range rf.peers {
@@ -124,11 +111,8 @@ func (rf *Raft) startElection() {
 		arg := RequestVoteArgs{
 			Term:        rf.CurrentTerm,
 			CandidateId: rf.me,
-			LastLogIdx:  len(rf.Log) - 1,
-			LastLogTerm: -1,
-		}
-		if len(rf.Log) > 0 {
-			arg.LastLogTerm = rf.Log[len(rf.Log)-1].Term
+			LastLogIdx:  rf.lastLogIndex(),
+			LastLogTerm: rf.lastLogTerm(),
 		}
 		args[i] = &arg
 	}

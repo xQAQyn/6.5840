@@ -39,7 +39,7 @@ while true; do
   printf '[%s] === run #%d starting (log: %s) ===\n' "$(date '+%H:%M:%S')" "$run" "$log"
 
   start=$(date +%s)
-  make RUN="-run 3A" raft1 > "$log" 2>&1
+  make RUN="-run 3D" raft1 > "$log" 2>&1
   rc=$?
   dur=$(( $(date +%s) - start ))
 
